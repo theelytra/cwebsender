@@ -20,3 +20,11 @@ messages:
 performance:
   connection-pool-size: 10
   timeout: 30000
+
+# WebSocket bağlantı ayarları
+websocket:
+  # Kimlik doğrulaması yapılmamış bağlantıların açık kalacağı maksimum süre (saniye cinsinden)
+  connection-timeout-seconds: 300
+  
+  # Kimlik doğrulama nonce'larının geçerli kalacağı maksimum süre (saniye cinsinden)
+  nonce-expiration-seconds: 300

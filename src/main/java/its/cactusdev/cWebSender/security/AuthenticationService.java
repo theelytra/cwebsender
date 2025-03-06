@@ -1,6 +1,8 @@
 package its.cactusdev.cWebSender.security;
 
 import io.javalin.websocket.WsContext;
+import its.cactusdev.cWebSender.CWebSender;
+import its.cactusdev.cWebSender.config.ConfigManager;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.json.simple.JSONObject;
 
@@ -16,12 +18,14 @@ public class AuthenticationService {
     private final boolean debugMode;
     private final Map<String, String> nonceMap = new ConcurrentHashMap<>();
     private final Map<String, Long> nonceTimestamps = new ConcurrentHashMap<>();
-    private final long NONCE_EXPIRATION_MS = 60000; // 1 dakika
+    private final Map<String, String> sessionNonceMap = new ConcurrentHashMap<>(); // Session ID -> Nonce eşlemesi
+    private final long nonceExpirationMs;
 
     public AuthenticationService(JavaPlugin plugin, KeyManager keyManager, boolean debugMode) {
         this.keyManager = keyManager;
         this.logger = plugin.getLogger();
         this.debugMode = debugMode;
+        this.nonceExpirationMs = ((CWebSender)plugin).getConfigManager().getNonceExpirationMs();
     }
 
     public String generateNonce() {
@@ -38,7 +42,7 @@ public class AuthenticationService {
     private void cleanExpiredNonces() {
         long currentTime = Instant.now().toEpochMilli();
         nonceTimestamps.entrySet().removeIf(entry -> 
-            currentTime - entry.getValue() > NONCE_EXPIRATION_MS);
+            currentTime - entry.getValue() > nonceExpirationMs);
         
         // Süresi dolmuş nonce'ları nonceMap'ten de kaldır
         nonceMap.keySet().retainAll(nonceTimestamps.keySet());
@@ -55,7 +59,7 @@ public class AuthenticationService {
         }
         
         long currentTime = Instant.now().toEpochMilli();
-        if (currentTime - timestamp > NONCE_EXPIRATION_MS) {
+        if (currentTime - timestamp > nonceExpirationMs) {
             // Süresi dolmuş nonce
             nonceMap.remove(nonce);
             nonceTimestamps.remove(nonce);
@@ -80,6 +84,13 @@ public class AuthenticationService {
             if (debugMode) {
                 logger.warning("Kimlik doğrulama başarısız: Geçersiz veya süresi dolmuş nonce");
             }
+            
+            // Oturum için kayıtlı bir nonce varsa ve bu eşleşmiyorsa yeni challenge gönderilecek
+            if (sessionNonceMap.containsKey(ctx.sessionId()) && 
+                !nonce.equals(sessionNonceMap.get(ctx.sessionId()))) {
+                return false;
+            }
+            
             return false;
         }
 
@@ -98,6 +109,8 @@ public class AuthenticationService {
 
     public void sendAuthenticationChallenge(WsContext ctx) {
         String nonce = generateNonce();
+        // Session ID ile nonce eşlemesini kaydet
+        sessionNonceMap.put(ctx.sessionId(), nonce);
         
         JSONObject challenge = new JSONObject();
         challenge.put("type", "authChallenge");

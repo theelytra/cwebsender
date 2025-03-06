@@ -2,6 +2,7 @@ package its.cactusdev.cWebSender.websocket;
 
 import io.javalin.Javalin;
 import io.javalin.websocket.WsContext;
+import its.cactusdev.cWebSender.config.ConfigManager;
 import its.cactusdev.cWebSender.handlers.CommandHandler;
 import its.cactusdev.cWebSender.handlers.PlaceholderHandler;
 import its.cactusdev.cWebSender.handlers.PlayerHandler;
@@ -11,8 +12,12 @@ import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
 
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 public class WebSocketManager {
@@ -22,10 +27,14 @@ public class WebSocketManager {
     private final int port;
     private Javalin app;
     private final Set<WsContext> authenticatedClients = ConcurrentHashMap.newKeySet();
+    private final Map<WsContext, Long> pendingClients = new ConcurrentHashMap<>();
     private final AuthenticationService authService;
     private final CommandHandler commandHandler;
     private final PlaceholderHandler placeholderHandler;
     private final PlayerHandler playerHandler;
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+    private final long connectionTimeoutMs;
+    private final ConfigManager configManager;
 
     public WebSocketManager(JavaPlugin plugin, AuthenticationService authService, int port, boolean debugMode) {
         this.plugin = plugin;
@@ -33,6 +42,8 @@ public class WebSocketManager {
         this.authService = authService;
         this.port = port;
         this.debugMode = debugMode;
+        this.configManager = ((its.cactusdev.cWebSender.CWebSender)plugin).getConfigManager();
+        this.connectionTimeoutMs = this.configManager.getConnectionTimeoutMs();
         this.commandHandler = new CommandHandler(plugin, debugMode);
         this.placeholderHandler = new PlaceholderHandler(plugin, debugMode);
         this.playerHandler = new PlayerHandler(plugin, debugMode);
@@ -43,17 +54,23 @@ public class WebSocketManager {
             config.showJavalinBanner = false;
         }).start(port);
 
+        // Düzenli olarak kimlik doğrulaması yapılmamış eski bağlantıları temizle
+        scheduler.scheduleWithFixedDelay(this::cleanupPendingConnections, 60, 60, TimeUnit.SECONDS);
+
         app.ws("/cwebsender", ws -> {
             ws.onConnect(ctx -> {
                 if (debugMode) {
                     logger.info("Yeni bağlantı: " + ctx.sessionId());
                 }
+                // Bağlantıyı bekleyenlere ekle ve zaman damgasını kaydet
+                pendingClients.put(ctx, System.currentTimeMillis());
                 // Bağlantı kurulduğunda kimlik doğrulama challenge'ı gönder
                 authService.sendAuthenticationChallenge(ctx);
             });
 
             ws.onClose(ctx -> {
                 authenticatedClients.remove(ctx);
+                pendingClients.remove(ctx);
                 if (debugMode) {
                     logger.info("İstemci bağlantısı kesildi: " + ctx.sessionId());
                 }
@@ -77,10 +94,21 @@ public class WebSocketManager {
                         handleAuthResponse(ctx, jsonMessage);
                         return;
                     }
+                    
+                    // Ping yanıtı - bağlantıyı aktif tutmak için
+                    if ("ping".equals(type)) {
+                        JSONObject response = new JSONObject();
+                        response.put("type", "pong");
+                        ctx.send(response.toJSONString());
+                        return;
+                    }
 
                     // Diğer tüm mesaj türleri için kimlik doğrulaması gerekli
                     if (!authenticatedClients.contains(ctx)) {
+                        // Kimlik doğrulaması gerektiğini belirt ama bağlantıyı kapatma
                         sendErrorResponse(ctx, "Kimlik doğrulaması gerekli");
+                        // Yeniden kimlik doğrulama challenge'ı gönder
+                        authService.sendAuthenticationChallenge(ctx);
                         return;
                     }
 
@@ -118,12 +146,43 @@ public class WebSocketManager {
         });
     }
 
+    private void cleanupPendingConnections() {
+        long currentTime = System.currentTimeMillis();
+        // Kimlik doğrulaması yapılmamış ve zaman aşımına uğramış bağlantıları temizle
+        pendingClients.entrySet().removeIf(entry -> {
+            WsContext ctx = entry.getKey();
+            long connectionTime = entry.getValue();
+            
+            // Kimlik doğrulaması yapılmışsa, pendingClients'tan çıkar
+            if (authenticatedClients.contains(ctx)) {
+                return true;
+            }
+            
+            // Zaman aşımına uğramış bağlantıları kapat
+            if (currentTime - connectionTime > connectionTimeoutMs) {
+                if (debugMode) {
+                    logger.warning("İstemci zaman aşımına uğradı, bağlantı kapatılıyor: " + ctx.sessionId());
+                }
+                // Zaman aşımı bildirimi gönder ve bağlantıyı kapat
+                JSONObject response = new JSONObject();
+                response.put("type", "error");
+                response.put("message", "Kimlik doğrulama zaman aşımı");
+                ctx.send(response.toJSONString());
+                ctx.session.close(1001, "Kimlik doğrulama zaman aşımı");
+                return true;
+            }
+            
+            return false;
+        });
+    }
+    
     private void handleAuthResponse(WsContext ctx, JSONObject jsonMessage) {
         String nonce = (String) jsonMessage.get("nonce");
         String signature = (String) jsonMessage.get("signature");
 
         if (authService.authenticate(ctx, nonce, signature)) {
             authenticatedClients.add(ctx);
+            pendingClients.remove(ctx); // Başarılı kimlik doğrulama sonrası bekleyen listesinden çıkar
             
             JSONObject response = new JSONObject();
             response.put("type", "authResponse");
@@ -143,6 +202,9 @@ public class WebSocketManager {
             if (debugMode) {
                 logger.warning("İstemci kimlik doğrulaması başarısız: " + ctx.sessionId());
             }
+            
+            // Yeniden kimlik doğrulama challenge'ı gönder, bağlantıyı kapatma
+            authService.sendAuthenticationChallenge(ctx);
         }
     }
 
@@ -158,8 +220,16 @@ public class WebSocketManager {
     }
 
     public void stop() {
+        if (scheduler != null) {
+            scheduler.shutdown();
+        }
         if (app != null) {
             app.stop();
         }
+    }
+    
+    // WebSocket sunucusunun çalışıp çalışmadığını kontrol et
+    public boolean isRunning() {
+        return app != null;
     }
 } 

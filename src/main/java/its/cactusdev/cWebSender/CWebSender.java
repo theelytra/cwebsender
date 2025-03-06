@@ -97,4 +97,8 @@ public class CWebSender extends JavaPlugin {
         }
         getLogger().info("cWebSender eklentisi devre dışı bırakıldı!");
     }
+    
+    public ConfigManager getConfigManager() {
+        return configManager;
+    }
 }
