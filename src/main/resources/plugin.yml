@@ -1,5 +1,5 @@
 name: cWebSender
-version: '1.0.0'
+version: '1.1'
 main: its.cactusdev.cWebSender.CWebSender
 api-version: '1.21'
 author: itscactusdev
