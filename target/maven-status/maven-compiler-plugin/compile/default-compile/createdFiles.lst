@@ -1,9 +1,0 @@
-its\cactusdev\cWebSender\websocket\WebSocketManager.class
-its\cactusdev\cWebSender\CWebSender.class
-its\cactusdev\cWebSender\security\KeyManager.class
-its\cactusdev\cWebSender\config\ConfigManager.class
-its\cactusdev\cWebSender\handlers\PlaceholderHandler.class
-its\cactusdev\cWebSender\utils\ResponseUtil.class
-its\cactusdev\cWebSender\handlers\CommandHandler.class
-its\cactusdev\cWebSender\security\AuthenticationService.class
-its\cactusdev\cWebSender\handlers\PlayerHandler.class
